@@ -1,5 +1,7 @@
+import { fabric } from 'fabric';
+import { writeFileSync } from 'fs';
 import opentype from 'opentype.js';
-import { writeSvg } from './src/utils/write-svg';
+import { optimize } from 'svgo';
 
 //#region
 
@@ -31,31 +33,26 @@ import { writeSvg } from './src/utils/write-svg';
 
 //#endregion
 
-const copy = `Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book.`;
-
-const getWords = (sentence: string) => {
-  return sentence.split(' ');
-};
-
-const SVG_INNERT_TOP_MARGIN = 3; // 3px - not accurate
-const PX_TO_PT_MULTIPLICATOR = 1.33;
-
-// props
 const maxWidth = 300;
 const fontSize = 15;
-const tracking = 0;
-const lineSpacing = 5;
+const tracking = -5;
+const lineSpacing = 3;
+const letterSpacing = 0;
 const kerning = false;
+const alignment: any = 'right';
 
-const init = () => {
-  const font = opentype.loadSync('./fonts/Roboto-Regular.ttf');
-  const words = getWords(copy);
+const fontLocation = './fonts/Roboto-Regular.ttf';
 
-  let lines = [];
-  let line: string[] = [];
+const copy = `Lorem \nIpsum is\n simply dummy text\n of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived\n not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised\n in the 1960s with the \nrelease of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software \nlike Aldus PageMaker including versions of Lorem Ipsum.`;
+
+const getLines = (currentLine: string, font: opentype.Font): string[] => {
+  const words = currentLine.split(' ').filter((word: string) => word !== ''); // exclude empty string as opentype renders them with the matchinf glyph
+
+  let currentLineWords: string[] = [];
+  let lines: string[] = [];
 
   for (let i = 0; i < words.length; i++) {
-    const tmpLine = `${line.join(' ')} ${words[i]}`;
+    const tmpLine = `${currentLineWords.join(' ')} ${words[i]}`;
 
     // using advancedWidth as it includes the white space aroudn the word/glyph (ascent and descent)
     const advancedWidth = font.getAdvanceWidth(tmpLine, fontSize, {
@@ -63,43 +60,190 @@ const init = () => {
       tracking,
     });
 
-    if (words[i + 1] === undefined) {
-      line.push(words[i]);
+    if (words[i] === 'content') {
+      console.log('advancedWidth > maxWidth', advancedWidth > maxWidth);
+      console.log(
+        'i === words.length - 1 && advancedWidth < maxWidth',
+        i === words.length - 1 && advancedWidth < maxWidth
+      );
     }
 
-    if (words[i + 1] === undefined || advancedWidth > maxWidth) {
-      lines.push(line.join(' '));
-      line = [words[i]];
+    if (advancedWidth > maxWidth) {
+      // text is overflowing
+      lines.push(currentLineWords.join(' '));
+      currentLineWords = [words[i]];
+    } else if (i === words.length - 1 && advancedWidth < maxWidth) {
+      lines.push([...currentLineWords, words[i]].join(' '));
     } else {
-      line.push(words[i]);
+      currentLineWords.push(words[i]);
     }
   }
 
-  // generate paths
-  const paths = lines.map((line, index) => {
-    const fontSizeInPt = fontSize * PX_TO_PT_MULTIPLICATOR;
-    const lineHeightInPt = lineSpacing * PX_TO_PT_MULTIPLICATOR;
+  return lines;
+};
 
-    const yPos =
-      (fontSizeInPt + lineHeightInPt) * (index + 1) - SVG_INNERT_TOP_MARGIN; // cheating here, not be as per the spcification rules
+const optimizeSvg = (svg: string) => {
+  const optimizedSvg: any = optimize(svg, {
+    plugins: [
+      'preset-default',
+      {
+        name: 'mergePaths',
+        active: true,
+      },
+    ],
+  });
+
+  return optimizedSvg.data;
+};
+
+const getTextAsSvg = (lines: string[], font: opentype.Font) => {
+  const canvas = new fabric.StaticCanvas('c');
+  let canvasHeight = 0;
+
+  lines.forEach((line, index) => {
+    const yPos = (fontSize + lineSpacing) * (index + 1) - fontSize / 2; // font/2 removes the invisible space around the svg
 
     const path = font.getPath(line, 0, yPos, fontSize, {
       kerning,
       tracking,
+      letterSpacing,
     });
 
-    return { svg: path.toSVG(1), path };
+    const cPath = new fabric.Path(path.toPathData(1), {
+      fill: 'currentColor',
+    });
+
+    canvasHeight = cPath.getBoundingRect().top + fontSize;
+    canvas.add(cPath);
+
+    if (alignment === 'center') {
+      canvas.centerObjectH(cPath);
+    }
+
+    if (alignment === 'right' && cPath.width && cPath.scaleX) {
+      cPath.set({
+        left: canvas.getWidth() - (cPath.width + 1) * cPath.scaleX,
+      });
+    }
   });
 
-  const height = paths[paths.length - 1].path.getBoundingBox().y2;
+  const canvasWidth = canvas.getWidth();
 
-  writeSvg(
-    paths.map((item) => item.svg),
-    copy,
-    fontSize,
-    height,
-    lineSpacing
+  return canvas.toSVG({
+    width: canvasWidth,
+    height: canvasHeight,
+    viewBox: {
+      x: 0,
+      y: 0,
+      width: canvasWidth,
+      height: canvasHeight,
+    },
+  });
+};
+
+const writeFile = (svg: string) => {
+  writeFileSync(
+    `./output/fabric.html`,
+    `
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Document</title>
+      </head>
+      <body>
+        <style>
+          @font-face {
+            font-family: Font;
+            src: url('${fontLocation}');
+          }
+    
+          * {
+            margin: 0;
+            padding: 0;
+          }
+
+          body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            align-content: center;
+            width: 100vw;
+            height: 100vh;
+          }
+    
+          h1 {
+            font-family: Font;
+            margin-bottom: 10px;
+          }
+    
+          div {
+            outline: 1px solid teal;
+            width: 300px;
+          }
+    
+          p {
+            position: relative;
+            box-sizing: border-box;
+            text-align: left;
+            font-family: Font;
+            letter-spacing: normal;
+            font-size: ${fontSize}px;
+            line-height: ${fontSize + lineSpacing}px;
+            margin-bottom: 50px;
+            text-align: ${alignment};
+            top: 0px;
+            -webkit-font-smoothing: antialiased;
+          }
+    
+          svg {
+            margin-bottom: 0;
+            fill: red;
+            stroke: none;
+          }
+    
+          path {
+            color: currentColor !important
+          }
+        </style>
+        <div>
+          <h1>Copy</h1>
+          <p>
+            ${copy.replace(/\n/g, '<br />')}
+          </p>
+
+          <h1>SVG</h1>
+          ${svg}
+
+        </div>
+      </body>
+    </html>
+    `
   );
+};
+
+const init = () => {
+  console.log('LOADING FONT');
+  const font = opentype.loadSync(fontLocation);
+
+  console.log('WRAPPING TEXT');
+  const hardLines = copy.split('\n'); // respect the hard coded line breaks, should split by <br /> and <br> as well but don't know the regex for it :D
+
+  let lines: string[] = [];
+  for (let i = 0; i < hardLines.length; i++) {
+    lines = [...lines, ...getLines(hardLines[i], font)];
+  }
+
+  console.log('GENERATING SVG');
+  const svg = getTextAsSvg(lines, font);
+
+  console.log('COMPRESSING THE SVG');
+  const optimizedSvg: any = optimizeSvg(svg);
+  writeFile(optimizedSvg);
+
+  console.log('DONE');
 };
 
 init();
